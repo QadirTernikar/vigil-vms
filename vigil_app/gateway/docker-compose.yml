@@ -1,0 +1,15 @@
+services:
+  go2rtc:
+    image: alexxit/go2rtc
+    container_name: vigil_gateway
+    # network_mode: host # Not supported on Windows/Mac properly
+    ports: 
+      - "1984:1984" # API
+      - "8554:8554" # RTSP
+      - "8555:8555/tcp" # WebRTC Signaling
+      - "8555:8555/udp" # WebRTC Media (Crucial!)
+    dns:
+      - 8.8.8.8
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml
+    restart: unless-stopped

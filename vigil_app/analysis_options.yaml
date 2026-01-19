@@ -1,0 +1,17 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # Strict linting rules
+    prefer_single_quotes: true
+    always_declare_return_types: true
+    avoid_print: true # Production apps should use a logger
+    prefer_const_constructors: true
+    annotate_overrides: true
+    unawaited_futures: true
+    avoid_empty_else: true
+    empty_statements: true
+    iterable_contains_unrelated_type: true
+    list_remove_unrelated_type: true
+    no_duplicate_case_values: true
+    valid_regexps: true
