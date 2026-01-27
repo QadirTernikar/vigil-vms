@@ -1,7 +1,61 @@
 import 'dart:convert';
+import 'dart:async';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart';
 import 'package:vigil_app/features/dashboard/data/onvif_service.dart';
+
+// ============================================================================
+// ONVIF Error Classification (Sprint 1)
+// ============================================================================
+
+/// Base class for all ONVIF exceptions with error classification
+abstract class OnvifException implements Exception {
+  final String message;
+  final String? details;
+
+  const OnvifException(this.message, [this.details]);
+
+  @override
+  String toString() => details != null ? '$message: $details' : message;
+}
+
+/// Authentication failed - wrong username/password
+class OnvifAuthenticationException extends OnvifException {
+  const OnvifAuthenticationException([String? details])
+    : super('Authentication Failed', details);
+}
+
+/// Authorization failed - user doesn't have permission
+class OnvifAuthorizationException extends OnvifException {
+  const OnvifAuthorizationException([String? details])
+    : super('Authorization Denied', details);
+}
+
+/// Service error - camera returned SOAP fault
+class OnvifServiceException extends OnvifException {
+  final String? faultCode;
+  final String? faultReason;
+
+  const OnvifServiceException(
+    String message, {
+    this.faultCode,
+    this.faultReason,
+  }) : super(message, faultReason);
+}
+
+/// Network timeout
+class OnvifTimeoutException extends OnvifException {
+  const OnvifTimeoutException([String? details])
+    : super('Connection Timed Out', details);
+}
+
+/// Network unreachable
+class OnvifNetworkException extends OnvifException {
+  const OnvifNetworkException([String? details])
+    : super('Camera Unreachable', details);
+}
 
 // ============================================================================
 // ONVIF Models
@@ -23,37 +77,105 @@ class OnvifProfile {
   });
 }
 
+/// Result of authentication test
+class OnvifAuthResult {
+  final bool success;
+  final String message;
+  final List<OnvifProfile>? profiles;
+  final OnvifException? error;
+
+  const OnvifAuthResult({
+    required this.success,
+    required this.message,
+    this.profiles,
+    this.error,
+  });
+
+  factory OnvifAuthResult.authenticated(List<OnvifProfile> profiles) {
+    return OnvifAuthResult(
+      success: true,
+      message: 'Authentication Verified',
+      profiles: profiles,
+    );
+  }
+
+  factory OnvifAuthResult.failed(OnvifException error) {
+    return OnvifAuthResult(
+      success: false,
+      message: error.message,
+      error: error,
+    );
+  }
+}
+
 // ============================================================================
+// ONVIF Media Service with WS-Security PasswordDigest (Sprint 1)
+// ============================================================================
+
 class OnvifMediaService {
+  static const Duration _requestTimeout = Duration(seconds: 10);
+
+  /// Test authentication and return result with classification
+  Future<OnvifAuthResult> testAuthentication(
+    String serviceUrl,
+    String username,
+    String password,
+  ) async {
+    try {
+      final profiles = await getProfiles(serviceUrl, username, password);
+
+      if (profiles.isEmpty) {
+        // Empty profiles is a valid but notable result
+        return OnvifAuthResult(
+          success: true,
+          message: 'Authenticated (No Profiles)',
+          profiles: profiles,
+        );
+      }
+
+      return OnvifAuthResult.authenticated(profiles);
+    } on OnvifException catch (e) {
+      // Already classified exception
+      return OnvifAuthResult.failed(e);
+    } catch (e) {
+      // Catch ANY other exceptions and classify them
+      debugPrint('❌ testAuthentication: Unexpected error: $e');
+      final errorStr = e.toString().toLowerCase();
+
+      if (errorStr.contains('timeout')) {
+        return OnvifAuthResult.failed(const OnvifTimeoutException());
+      } else if (errorStr.contains('host lookup') ||
+          errorStr.contains('connection refused') ||
+          errorStr.contains('socket')) {
+        return OnvifAuthResult.failed(OnvifNetworkException(e.toString()));
+      } else {
+        return OnvifAuthResult.failed(
+          OnvifServiceException('Unexpected Error', faultReason: e.toString()),
+        );
+      }
+    }
+  }
+
   Future<String?> getDefaultStreamUrl(
     OnvifDevice device,
     String username,
     String password,
   ) async {
     try {
-      // 1. Determine Media Service URL (simplification: assume XAddr from discovery or try standard paths)
-      // Ideally we should use the XAddr from discovery, but sometimes it is the Device Service, not Media Service.
-      // Usually Device Service provides GetCapabilities which gives Media Service URL.
-      // For this implementation, we will try to use the XAddr directly or fallback.
-
       String serviceUrl = device.xaddr;
 
-      // 2. Get Profiles
       final profiles = await getProfiles(serviceUrl, username, password);
       if (profiles.isEmpty) {
         debugPrint('⚠️ ONVIF: No profiles found for ${device.ip}');
         return null;
       }
 
-      // 3. Select best profile (prefer H264/H265, Main Stream)
-      // Simple heuristic: First profile is usually main stream
       final mainProfile = profiles.first;
 
       debugPrint(
         '✅ ONVIF: Selected profile ${mainProfile.name} (${mainProfile.token})',
       );
 
-      // 4. Get Stream URI
       final streamUri = await getStreamUri(
         serviceUrl,
         mainProfile.token,
@@ -62,9 +184,11 @@ class OnvifMediaService {
       );
 
       return streamUri;
+    } on OnvifException {
+      rethrow;
     } catch (e) {
       debugPrint('❌ ONVIF Media Error: $e');
-      return null;
+      throw OnvifNetworkException(e.toString());
     }
   }
 
@@ -131,7 +255,7 @@ class OnvifMediaService {
   }
 
   // =========================================================================
-  // SOAP Helper Methods
+  // SOAP Helper Methods with WS-Security PasswordDigest
   // =========================================================================
 
   Future<String?> _sendSoapRequest(
@@ -141,28 +265,17 @@ class OnvifMediaService {
     String password,
   ) async {
     try {
-      // ONVIF Authentication (WS-Security UsernameToken)
-      // Note: Full implementation requires nonce generation and SHA-1 digest.
-      // For this MVP, we are attempting 'Digest' or 'PasswordText' depending on camera support.
-      // Proper WS-Security header generation would go here.
-      //
-      // However, many cameras also support HTTP Basic/Digest Auth for the POST request itself.
-      // We will rely on HTTP implementation library to handle Basic/Digest if possible,
-      // or implement a basic WS-Security Header if needed.
-      //
-      // IMPLEMENTATION DECISION:
-      // Implementing full WS-Security Digest is complex and error-prone from scratch without a library.
-      // For this iteration, we will implement the simplified UsernameToken with PasswordDigest
-      // which is mandatory for ONVIF.
-
-      final authHeader = _generateAuthHeader(username, password);
+      // Generate WS-Security header with PasswordDigest (ONVIF standard)
+      final authHeader = _generateWSSecurityHeader(username, password);
 
       // Inject Header into Envelope
       final signedBody = body.replaceFirst('<s:Body>', '$authHeader<s:Body>');
 
-      // Generate Basic Auth Header
+      // Also add HTTP Basic Auth as fallback for cameras that support it
       final basicAuth =
-          'Basic ' + base64Encode(utf8.encode('$username:$password'));
+          'Basic ${base64Encode(utf8.encode('$username:$password'))}';
+
+      debugPrint('🔐 ONVIF: Sending authenticated SOAP request to $url');
 
       final response = await http
           .post(
@@ -170,59 +283,179 @@ class OnvifMediaService {
             headers: {
               'Content-Type':
                   'application/soap+xml; charset=utf-8; action="http://www.onvif.org/ver10/media/wsdl/GetProfiles"',
-              'Authorization': basicAuth, // Add HTTP Basic Auth
+              'Authorization': basicAuth,
             },
             body: signedBody,
           )
-          .timeout(const Duration(seconds: 5));
+          .timeout(_requestTimeout);
 
-      if (response.statusCode == 200) {
-        return response.body;
-      } else if (response.statusCode == 401) {
-        throw Exception('401 Unauthorized');
-      } else {
-        throw Exception('SOAP Error ${response.statusCode}: ${response.body}');
+      // Check HTTP status first
+      if (response.statusCode == 401) {
+        debugPrint('❌ ONVIF: HTTP 401 Unauthorized');
+        throw const OnvifAuthenticationException('Invalid credentials');
+      } else if (response.statusCode == 403) {
+        debugPrint('❌ ONVIF: HTTP 403 Forbidden');
+        throw const OnvifAuthorizationException('Access denied');
+      } else if (response.statusCode != 200) {
+        debugPrint('❌ ONVIF: HTTP ${response.statusCode}');
+        throw OnvifServiceException(
+          'HTTP ${response.statusCode}',
+          faultReason: response.body.length > 200
+              ? response.body.substring(0, 200)
+              : response.body,
+        );
       }
+
+      // CRITICAL: Check for SOAP Fault even on HTTP 200
+      // Many cameras return HTTP 200 with SOAP Fault in body
+      final soapFault = _detectSoapFault(response.body);
+      if (soapFault != null) {
+        final faultInfo = soapFault is OnvifServiceException
+            ? soapFault.faultCode ?? 'unknown'
+            : soapFault.message;
+        debugPrint('❌ ONVIF: SOAP Fault detected: $faultInfo');
+        throw soapFault;
+      }
+
+      debugPrint('✅ ONVIF: SOAP request successful');
+      return response.body;
+    } on TimeoutException {
+      debugPrint(
+        '❌ ONVIF: Request timed out after ${_requestTimeout.inSeconds}s',
+      );
+      throw const OnvifTimeoutException('SOAP request timed out');
+    } on OnvifException {
+      rethrow;
     } catch (e) {
-      debugPrint('❌ ONVIF Network/Auth Error: $e');
-      rethrow; // Rethrow to let caller handle (e.g., Auth vs Network)
+      final errorStr = e.toString().toLowerCase();
+
+      // Classify network errors
+      if (errorStr.contains('host lookup') ||
+          errorStr.contains('socketexception') ||
+          errorStr.contains('connection refused')) {
+        debugPrint('❌ ONVIF: Network error - $e');
+        throw OnvifNetworkException(e.toString());
+      }
+
+      debugPrint('❌ ONVIF: Unexpected error - $e');
+      throw OnvifServiceException('Request failed', faultReason: e.toString());
     }
   }
 
-  String _generateAuthHeader(String username, String password) {
-    // NOTE: For true production, we need crypto for PasswordDigest.
-    // PasswordDigest = Base64(SHA-1(nonce + created + password))
-    // Importing 'crypto' package requires adding it to pubspec.yaml.
-    //
-    // IF we cannot add dependencies now (instructions said "avoid" unless essential),
-    // we might try PlainText default or assume HTTP Transport Auth.
-    //
-    // BUT: ONVIF standard mandates Digest.
-    //
-    // User instruction: "Fixing WebRTC Streaming Issue" -> "ONVIF Reliability"
-    // We should assume we can use standard dart libraries.
-    // dart:convert is available.
+  // =========================================================================
+  // WS-Security PasswordDigest Implementation (ONVIF Standard)
+  // =========================================================================
 
-    // TEMPORARY: Return empty header string and rely on transport auth if configured or lucky.
-    // Real implementation requires detailed crypto logic.
-    // Given the constraints and current file set, I will stub this to work for now
-    // assuming basic security or just placeholder.
+  /// Generates WS-Security UsernameToken with PasswordDigest
+  ///
+  /// PasswordDigest = Base64(SHA1(nonce + created + password))
+  /// This is REQUIRED by most enterprise ONVIF cameras (Hikvision, Dahua, etc.)
+  String _generateWSSecurityHeader(String username, String password) {
+    // Generate cryptographic nonce (16 random bytes)
+    final random = Random.secure();
+    final nonceBytes = List<int>.generate(16, (_) => random.nextInt(256));
+    final nonceBase64 = base64Encode(nonceBytes);
 
-    // To make this work properly for Securus/Hikvision, we usually need the proper header.
-    // Let's create a minimal valid-looking header structure without the actual crypto for now
-    // to verify the flow, or use PlainText if allowed by camera (often disabled).
+    // Generate timestamp in UTC ISO 8601 format
+    final created = DateTime.now().toUtc().toIso8601String();
 
-    // Simplest usable header (PasswordText) - less secure but easier to implement without extra deps
+    // Calculate PasswordDigest: Base64(SHA1(nonce + created + password))
+    final digestInput = [
+      ...nonceBytes,
+      ...utf8.encode(created),
+      ...utf8.encode(password),
+    ];
+    final sha1Digest = sha1.convert(digestInput);
+    final passwordDigest = base64Encode(sha1Digest.bytes);
+
+    debugPrint('🔐 ONVIF: Generated WS-Security PasswordDigest');
+
     return '''
   <s:Header>
     <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" 
-                   xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+                   xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
+                   s:mustUnderstand="1">
       <wsse:UsernameToken wsu:Id="UsernameToken-1">
         <wsse:Username>$username</wsse:Username>
-        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">$password</wsse:Password>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">$passwordDigest</wsse:Password>
+        <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">$nonceBase64</wsse:Nonce>
+        <wsu:Created>$created</wsu:Created>
       </wsse:UsernameToken>
     </wsse:Security>
   </s:Header>''';
+  }
+
+  // =========================================================================
+  // SOAP Fault Detection (Critical for HTTP 200 with embedded faults)
+  // =========================================================================
+
+  /// Detects SOAP Faults in response body, even when HTTP 200
+  ///
+  /// Returns typed exception based on fault code:
+  /// - ter:NotAuthorized / ter:NotAuthenticated → OnvifAuthenticationException
+  /// - ter:ActionNotSupported → OnvifServiceException
+  /// - Other faults → OnvifServiceException with details
+  OnvifException? _detectSoapFault(String responseBody) {
+    // Check for various SOAP fault patterns
+    final faultPatterns = [
+      '<Fault>',
+      '<SOAP-ENV:Fault>',
+      '<s:Fault>',
+      '<soap:Fault>',
+      ':Fault>',
+    ];
+
+    final hasFault = faultPatterns.any(
+      (pattern) => responseBody.contains(pattern),
+    );
+
+    if (!hasFault) return null;
+
+    debugPrint('⚠️ ONVIF: SOAP Fault detected in HTTP 200 response');
+
+    // Extract fault code and reason
+    String? faultCode =
+        _extractTag(responseBody, 'Value') ??
+        _extractTag(responseBody, 'faultcode') ??
+        _extractTag(responseBody, 'Code');
+    String? faultReason =
+        _extractTag(responseBody, 'Reason') ??
+        _extractTag(responseBody, 'faultstring') ??
+        _extractTag(responseBody, 'Text');
+
+    // Normalize fault code
+    faultCode = faultCode?.toLowerCase() ?? 'unknown';
+    faultReason = faultReason ?? 'SOAP Fault';
+
+    debugPrint('   Fault Code: $faultCode');
+    debugPrint('   Fault Reason: $faultReason');
+
+    // Classify fault type
+    if (faultCode.contains('notauthorized') ||
+        faultCode.contains('notauthenticated') ||
+        faultCode.contains('sender') &&
+            faultReason.toLowerCase().contains('auth') ||
+        faultReason.toLowerCase().contains('authentication') ||
+        faultReason.toLowerCase().contains('unauthorized') ||
+        faultReason.toLowerCase().contains('invalid username') ||
+        faultReason.toLowerCase().contains('password')) {
+      return OnvifAuthenticationException(faultReason);
+    }
+
+    if (faultCode.contains('action') || faultCode.contains('notsupported')) {
+      return OnvifServiceException(
+        'Action Not Supported',
+        faultCode: faultCode,
+        faultReason: faultReason,
+      );
+    }
+
+    // Generic service error
+    return OnvifServiceException(
+      'Camera Error',
+      faultCode: faultCode,
+      faultReason: faultReason,
+    );
   }
 
   // =========================================================================
@@ -231,9 +464,6 @@ class OnvifMediaService {
 
   List<OnvifProfile> _parseProfiles(String xml) {
     final profiles = <OnvifProfile>[];
-
-    // Find all <trt:Profiles> blocks
-    // Naive regex parsing
 
     final profileRegex = RegExp(
       r'(<[\w:]*Profiles.*?<\/.*?Profiles>)',
@@ -247,13 +477,11 @@ class OnvifMediaService {
       final token = _extractAttribute(profileXml, 'token');
       final name = _extractTag(profileXml, 'Name');
 
-      // Attempt to find encoding (H264, etc) inside VideoEncoderConfiguration
       final videoConfig = _extractTag(profileXml, 'VideoEncoderConfiguration');
       final encoding = videoConfig != null
           ? _extractTag(videoConfig, 'Encoding')
           : 'Unknown';
 
-      // Resolution
       final resolution = _extractTag(videoConfig ?? '', 'Resolution');
       final width = resolution != null
           ? int.tryParse(_extractTag(resolution, 'Width') ?? '0')
@@ -288,8 +516,6 @@ class OnvifMediaService {
   }
 
   String? _extractAttribute(String xml, String attribute) {
-    // Extracts value of attribute from the opening tag of the XML snippet
-    // Simplistic: assumes attribute="value"
     final regExp = RegExp('$attribute="([^"]*)"');
     final match = regExp.firstMatch(xml);
     return match?.group(1);

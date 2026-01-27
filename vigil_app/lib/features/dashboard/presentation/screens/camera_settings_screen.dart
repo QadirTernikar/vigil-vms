@@ -317,11 +317,10 @@ class _CameraSettingsScreenState extends State<CameraSettingsScreen> {
     }
 
     setState(() => _isTesting = true);
-    // Hide current snackbar to show "Testing..."
     _showSnack('Testing connection to $ip...', isError: false);
 
     try {
-      // 1. TCP Connectivity Check (Fast Fail)
+      // 1. TCP Connectivity Check (Fast Fail) - Layer 1: Socket Reachability
       try {
         final socket = await Socket.connect(
           ip,
@@ -329,98 +328,157 @@ class _CameraSettingsScreenState extends State<CameraSettingsScreen> {
           timeout: const Duration(seconds: 3),
         );
         socket.destroy();
+        debugPrint('✅ Layer 1: Socket reachable on port $port');
       } catch (e) {
-        _showSnack('❌ Camera Offline (Unreachable)', isError: true);
+        _showSnack('❌ Camera Offline (Port $port Unreachable)', isError: true);
         if (mounted) setState(() => _isTesting = false);
         return;
       }
 
-      // 2. Auth Check (via ONVIF)
+      // 2. ONVIF Auth Check - Layer 2: Authentication Verification
       final mediaService = OnvifMediaService();
-      final tempDevice = OnvifDevice(
-        ip: ip,
-        xaddr: 'http://$ip/onvif/device_service',
-        manufacturer: 'Unknown',
-        hardware: 'Unknown',
-        responseTime: Duration.zero,
+
+      // Try multiple ONVIF endpoint paths (different cameras use different paths)
+      final onvifPaths = [
+        'http://$ip/onvif/media_service', // Most common
+        'http://$ip/onvif/Media', // Some Hikvision
+        'http://$ip:8080/onvif/media_service', // Port 8080 variant
+        'http://$ip/onvif/device_service', // Fallback
+      ];
+
+      OnvifAuthResult? authResult;
+      String? workingPath;
+
+      for (final path in onvifPaths) {
+        debugPrint('🔍 Trying ONVIF endpoint: $path');
+        authResult = await mediaService.testAuthentication(path, user, pass);
+
+        // If we get an auth error, that means the endpoint is working
+        // but credentials are wrong - this is the answer we need!
+        if (authResult.success ||
+            authResult.error is OnvifAuthenticationException ||
+            authResult.error is OnvifAuthorizationException) {
+          workingPath = path;
+          debugPrint('✅ Found working ONVIF endpoint: $path');
+          break;
+        }
+
+        // If HTTP 400/404, try next endpoint
+        if (authResult.error is OnvifServiceException) {
+          final serviceErr = authResult.error as OnvifServiceException;
+          if (serviceErr.message.contains('400') ||
+              serviceErr.message.contains('404')) {
+            debugPrint(
+              '⚠️ Endpoint $path returned ${serviceErr.message}, trying next...',
+            );
+            continue;
+          }
+        }
+
+        // For other errors (timeout, network), stop and report
+        break;
+      }
+
+      // Use the last authResult (either success or the last error)
+      authResult ??= OnvifAuthResult.failed(
+        const OnvifNetworkException('All ONVIF endpoints failed'),
       );
 
-      try {
-        // Try to fetch profiles - this verifies Credentials
-        final profiles = await mediaService.getProfiles(
-          tempDevice.xaddr,
-          user,
-          pass,
-        );
-
-        if (profiles.isEmpty) {
-          // Edge case: Auth worked but no profiles?
-          _showSnack('✅ Credentials OK (No Profiles Found)', isError: false);
-        } else {
-          // 3. Path Verification (RTSP Check)
-          // Credentials are good. Now let's see if the manual URL matches ONVIF.
-          final actualUri = await mediaService.getDefaultStreamUrl(
-            tempDevice,
-            user,
-            pass,
-          );
-
-          if (actualUri != null && actualUri != manualUrl) {
-            // Mismatch detected!
-            _showSnack(
-              '⚠️ Credentials OK, but Stream Path differs!',
-              isError: true,
-            );
-            debugPrint('Expected: $actualUri, Got: $manualUrl');
-
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('⚠️ Invalid Path? Camera wants: $actualUri'),
-                  backgroundColor: Colors.orange,
-                  duration: const Duration(seconds: 8),
-                  action: SnackBarAction(
-                    label: 'FIX',
-                    textColor: Colors.white,
-                    onPressed: () {
-                      if (mounted)
-                        setState(() => _urlController.text = actualUri);
-                    },
-                  ),
-                ),
-              );
-            }
-            if (mounted) setState(() => _isTesting = false);
-            return;
-          }
-
+      if (!authResult.success) {
+        // Handle typed exceptions with proper user messages
+        final error = authResult.error;
+        if (error is OnvifAuthenticationException) {
           _showSnack(
-            '✅ Connection Verified (Credentials & Path OK)',
-            isError: false,
+            '❌ Authentication Failed. Check Username/Password.',
+            isError: true,
           );
-        }
-      } catch (e) {
-        final err = e.toString();
-        debugPrint('ONVIF Error in Test: $err');
-
-        if (err.contains('401') || err.contains('Authorized')) {
-          _showSnack('❌ Authentication Failed. Check Password.', isError: true);
-        } else if (err.contains('Host lookup') ||
-            err.contains('Connection refused')) {
-          // Should have been caught by Socket check, but maybe HTTP port is different
+        } else if (error is OnvifAuthorizationException) {
+          _showSnack('❌ Access Denied. User lacks permission.', isError: true);
+        } else if (error is OnvifTimeoutException) {
+          _showSnack(
+            '❌ Connection Timed Out. Camera may be slow.',
+            isError: true,
+          );
+        } else if (error is OnvifNetworkException) {
           _showSnack(
             '❌ ONVIF Service Unreachable (Check Port 80/8080)',
             isError: true,
           );
+        } else if (error is OnvifServiceException) {
+          _showSnack('❌ Camera Error: ${error.message}', isError: true);
         } else {
-          _showSnack(
-            '⚠️ Port 554 Open, but ONVIF Failed ($err)',
-            isError: false,
-          );
+          _showSnack('❌ ${authResult.message}', isError: true);
         }
+        if (mounted) setState(() => _isTesting = false);
+        return;
+      }
+
+      debugPrint('✅ Layer 2: ONVIF authentication verified');
+
+      // Authentication successful - now check profiles
+      final profiles = authResult.profiles ?? [];
+
+      if (profiles.isEmpty) {
+        _showSnack('✅ Credentials OK (No Profiles Found)', isError: false);
+        if (mounted) setState(() => _isTesting = false);
+        return;
+      }
+
+      // 3. Path Verification - Layer 3: RTSP Path Check
+      try {
+        // Create device with working ONVIF path
+        final tempDevice = OnvifDevice(
+          ip: ip,
+          xaddr: workingPath ?? 'http://$ip/onvif/media_service',
+          manufacturer: 'Unknown',
+          hardware: 'Unknown',
+          responseTime: Duration.zero,
+        );
+
+        final actualUri = await mediaService.getDefaultStreamUrl(
+          tempDevice,
+          user,
+          pass,
+        );
+
+        if (actualUri != null && actualUri != manualUrl) {
+          debugPrint(
+            '⚠️ Path mismatch - Expected: $actualUri, Got: $manualUrl',
+          );
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('⚠️ Stream Path differs from camera config'),
+                backgroundColor: Colors.orange,
+                duration: const Duration(seconds: 8),
+                action: SnackBarAction(
+                  label: 'FIX',
+                  textColor: Colors.white,
+                  onPressed: () {
+                    if (mounted)
+                      setState(() => _urlController.text = actualUri);
+                  },
+                ),
+              ),
+            );
+          }
+          if (mounted) setState(() => _isTesting = false);
+          return;
+        }
+
+        _showSnack('✅ Connection Verified (Auth & Path OK)', isError: false);
+      } on OnvifException catch (e) {
+        // Path verification failed but auth was OK
+        _showSnack('✅ Auth OK, Path Check: ${e.message}', isError: false);
       }
     } catch (e) {
-      _showSnack('❌ Test Failed: $e', isError: true);
+      debugPrint('❌ Unexpected test error: $e');
+      _showSnack(
+        '❌ Test Failed: ${e.toString().split(':').last}',
+        isError: true,
+      );
     } finally {
       if (mounted) setState(() => _isTesting = false);
     }

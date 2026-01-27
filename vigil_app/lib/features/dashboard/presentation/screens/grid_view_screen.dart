@@ -1,33 +1,31 @@
-import 'dart:io';
 import 'dart:async';
-import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:vigil_app/features/dashboard/data/camera_repository.dart';
 import 'package:vigil_app/features/dashboard/domain/camera_model.dart';
-import 'package:vigil_app/features/dashboard/presentation/widgets/stream_player.dart';
 import 'package:vigil_app/features/dashboard/presentation/screens/add_camera_screen.dart';
-import 'package:vigil_app/features/dashboard/presentation/screens/camera_settings_screen.dart';
-import 'package:vigil_app/features/dashboard/data/snapshot_service.dart';
+import 'package:vigil_app/features/dashboard/presentation/widgets/camera_tile.dart';
+import 'package:vigil_app/features/playback/presentation/screens/playback_screen.dart';
+import 'package:vigil_app/features/dashboard/presentation/screens/snapshot_gallery_screen.dart';
+import 'package:vigil_app/features/scheduler/presentation/screens/scheduler_screen.dart';
 
 class GridViewScreen extends ConsumerStatefulWidget {
   const GridViewScreen({super.key});
 
+  // ... rest matches
   @override
   ConsumerState<GridViewScreen> createState() => _GridViewScreenState();
 }
 
 class _GridViewScreenState extends ConsumerState<GridViewScreen> {
   final _repository = CameraRepository();
-  final _snapshotService = SnapshotService();
   late Future<List<Camera>> _camerasFuture;
-
-  // Map to store GlobalKeys for each camera's StreamPlayer
-  final Map<String, GlobalKey<ConsumerState<StreamPlayer>>> _playerKeys = {};
 
   Timer? _connectivityTimer;
   bool _isOffline = false;
+  int _gridSize = 2; // Default 2x2, options: 2-7
 
   @override
   void initState() {
@@ -48,8 +46,6 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
 
   Future<void> _checkStatus() async {
     try {
-      // Simple check: Look for any non-loopback IPv4 interface
-      // Or we could try to resolve a known host, but interface check is local and fast
       final interfaces = await NetworkInterface.list();
       final hasNetwork = interfaces.any(
         (i) => i.addresses.any(
@@ -65,7 +61,6 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
           _refreshCameras(); // Auto-reload when network comes back
       }
     } catch (e) {
-      // If listing interfaces fails, assume offline or weird state
       debugPrint('Network Check Error: $e');
     }
   }
@@ -80,43 +75,6 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
     setState(() {
       _camerasFuture = _repository.getCameras();
     });
-  }
-
-  Future<void> _takeSnapshot(Camera cam) async {
-    try {
-      // Get the StreamPlayer widget for this camera
-      final playerKey = _playerKeys[cam.id];
-      if (playerKey == null || playerKey.currentState == null) {
-        throw Exception('Stream player not found');
-      }
-
-      debugPrint('📸 Requesting snapshot from StreamPlayer for ${cam.name}');
-
-      // Capture from the renderer - cast to dynamic to access the method
-      final state = playerKey.currentState as dynamic;
-      final bytes = await state.captureSnapshot() as Uint8List?;
-
-      if (bytes != null) {
-        await _snapshotService.uploadSnapshot(cam.id, bytes);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('✅ Snapshot saved for ${cam.name}')),
-          );
-        }
-      } else {
-        throw Exception('Renderer returned null image');
-      }
-    } catch (e) {
-      debugPrint('❌ Snapshot failed: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Snapshot Failed: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    }
   }
 
   // Temporary helper to add a test camera
@@ -155,6 +113,18 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
         elevation: 2,
         actions: [
           IconButton(
+            icon: const Icon(Icons.photo_library),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SnapshotGalleryScreen(),
+                ),
+              );
+            },
+            tooltip: 'Evidence Gallery',
+          ),
+          IconButton(
             icon: const Icon(Icons.add_circle_outline),
             onPressed: () async {
               final result = await Navigator.push(
@@ -170,9 +140,39 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
             tooltip: 'Add Camera',
           ),
           IconButton(
+            icon: const Icon(Icons.play_circle_fill),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const PlaybackScreen()),
+              );
+            },
+            tooltip: 'Playback & Timeline',
+          ),
+          IconButton(
+            icon: const Icon(Icons.schedule),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const SchedulerScreen()),
+              );
+            },
+            tooltip: 'Recording Schedules',
+          ),
+          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _refreshCameras,
             tooltip: 'Refresh Grid',
+          ),
+          // Grid Size Selector
+          PopupMenuButton<int>(
+            icon: const Icon(Icons.grid_view),
+            tooltip: 'Grid Size',
+            onSelected: (size) => setState(() => _gridSize = size),
+            itemBuilder: (_) => [2, 3, 4, 5, 6, 7]
+                .map((n) => PopupMenuItem(value: n, child: Text('${n}x$n')))
+                .toList(),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -242,8 +242,8 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
                 // Responsive Grid Layout
                 return GridView.builder(
                   padding: const EdgeInsets.all(4),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2, // 2x2 Grid
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: _gridSize,
                     childAspectRatio: 16 / 9,
                     crossAxisSpacing: 4,
                     mainAxisSpacing: 4,
@@ -251,171 +251,30 @@ class _GridViewScreenState extends ConsumerState<GridViewScreen> {
                   itemCount: cameras.length,
                   itemBuilder: (context, index) {
                     final cam = cameras[index];
-                    return Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade800),
-                        color: Colors.black,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          // 1. Stream Player
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(3),
-                            child: StreamPlayer(
-                              key: _playerKeys.putIfAbsent(
-                                cam.id,
-                                () => GlobalKey<ConsumerState<StreamPlayer>>(),
+                    return CameraTile(
+                      key: ValueKey(cam.id), // Preserve state
+                      camera: cam,
+                      host: defaultHost,
+                      onRefresh: _refreshCameras,
+                      onDelete: (id) async {
+                        // Delete Logic
+                        try {
+                          await _repository.deleteCamera(id);
+                          if (mounted)
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Camera Deleted')),
+                            );
+                          _refreshCameras();
+                        } catch (e) {
+                          if (mounted)
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Delete Failed: $e'),
+                                backgroundColor: Colors.red,
                               ),
-                              streamName: cam.streamUrl,
-                              host: defaultHost,
-                            ),
-                          ),
-
-                          // 2. Camera Label Overlay (Top Left)
-                          Positioned(
-                            top: 8,
-                            left: 8,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.circle,
-                                    color: _isOffline
-                                        ? Colors.red
-                                        : Colors.green,
-                                    size: 8,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    cam.name,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-
-                          // 3. Settings Icon (Top Right, Left of Menu)
-                          Positioned(
-                            top: 8,
-                            right: 48,
-                            child: Material(
-                              color: Colors.transparent,
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(16),
-                                onTap: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (context) =>
-                                          CameraSettingsScreen(camera: cam),
-                                    ),
-                                  );
-                                  if (result == true) {
-                                    _refreshCameras();
-                                  }
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.all(4),
-                                  decoration: const BoxDecoration(
-                                    color: Colors.black54,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.settings,
-                                    color: Colors.white70,
-                                    size: 20,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-
-                          // 4. Menu Actions (Top Right)
-                          Positioned(
-                            top: 4,
-                            right: 4,
-                            child: PopupMenuButton<String>(
-                              icon: const Icon(
-                                Icons.more_vert,
-                                color: Colors.white70,
-                                size: 20,
-                              ),
-                              onSelected: (value) async {
-                                if (value == 'snapshot') {
-                                  await _takeSnapshot(cam);
-                                } else if (value == 'delete') {
-                                  try {
-                                    await _repository.deleteCamera(cam.id);
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Camera Deleted'),
-                                        ),
-                                      );
-                                    }
-                                    _refreshCameras();
-                                  } catch (e) {
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text('Delete Failed: $e'),
-                                          backgroundColor: Colors.red,
-                                        ),
-                                      );
-                                    }
-                                  }
-                                }
-                              },
-                              itemBuilder: (context) => [
-                                const PopupMenuItem(
-                                  value: 'snapshot',
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.camera_alt,
-                                        color: Colors.black54,
-                                      ),
-                                      SizedBox(width: 8),
-                                      Text('Take Snapshot'),
-                                    ],
-                                  ),
-                                ),
-                                const PopupMenuItem(
-                                  value: 'delete',
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.delete, color: Colors.red),
-                                      SizedBox(width: 8),
-                                      Text(
-                                        'Delete Camera',
-                                        style: TextStyle(color: Colors.red),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
+                            );
+                        }
+                      },
                     );
                   },
                 );

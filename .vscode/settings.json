@@ -1,0 +1,8 @@
+{
+    "dart.addSdkToTerminalPath": true,
+    "dart.debugSdkLibraries": true,
+    "dart.flutterSdkPath": "C:/src/flutter",
+    "dart.sdkPaths": [
+        "C:/src/flutter"
+    ]
+}

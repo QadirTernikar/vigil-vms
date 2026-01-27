@@ -42,6 +42,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+**/android/build/
+**/android/.gradle/
 
 # Windows specific
 Thumbs.db
@@ -55,6 +57,14 @@ Thumbs.db
 # Go2RTC or other local services
 /go2rtc/
 /data/
+**/ffmpeg/*
+!**/ffmpeg/.gitkeep
+
+# Mobile specific
+*.ap_
+*.ap
+*.apk
+*.aab
 
 # Brain/Antigravity artifacts (development docs)
 .gemini/

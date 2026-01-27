@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:webview_windows/webview_windows.dart';
 
-/// MSE Stream Player - Uses WebView to display Go2RTC's MSE stream
-/// This is a reliable fallback when WebRTC ICE fails (Windows/Docker).
+/// MSE Stream Player - Placeholder for WebView-based Go2RTC MSE stream
+///
+/// NOTE: The webview_windows package is not currently installed.
+/// This is a fallback player that would use WebView to display Go2RTC's MSE stream
+/// when WebRTC ICE fails (Windows/Docker environments).
+///
+/// To enable this feature, add to pubspec.yaml:
+///   webview_windows: ^0.4.0
+///
+/// For Sprint 1, this is stubbed out as it's not part of the security/auth scope.
 class MseStreamPlayer extends StatefulWidget {
   final String streamId;
   final String host;
@@ -18,79 +25,32 @@ class MseStreamPlayer extends StatefulWidget {
 }
 
 class _MseStreamPlayerState extends State<MseStreamPlayer> {
-  final _controller = WebviewController();
-  bool _isLoading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _initWebView();
-  }
-
-  Future<void> _initWebView() async {
-    try {
-      await _controller.initialize();
-
-      // Generate the Go2RTC embedded player URL
-      // Go2RTC serves an HTML player at: http://host:1984/stream.html?src=streamId
-      final playerUrl =
-          'http://${widget.host}:1984/stream.html?src=${widget.streamId}&mode=mse';
-
-      debugPrint('Loading MSE Player: $playerUrl');
-
-      await _controller.loadUrl(playerUrl);
-
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    } catch (e) {
-      debugPrint('MSE WebView Error: $e');
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _error = e.toString();
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_error != null) {
-      return Container(
-        color: Colors.black87,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error, color: Colors.red, size: 32),
-              const SizedBox(height: 8),
-              Text(
-                'WebView Error',
-                style: const TextStyle(color: Colors.white),
+    // Placeholder UI until webview_windows is added
+    return Container(
+      color: Colors.black87,
+      child: const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.web_asset, color: Colors.grey, size: 48),
+            SizedBox(height: 16),
+            Text(
+              'MSE Player Unavailable',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
               ),
-            ],
-          ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'WebView support not installed',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
         ),
-      );
-    }
-
-    if (_isLoading) {
-      return Container(
-        color: Colors.black,
-        child: const Center(
-          child: CircularProgressIndicator(color: Colors.deepPurple),
-        ),
-      );
-    }
-
-    return Webview(_controller);
+      ),
+    );
   }
 }

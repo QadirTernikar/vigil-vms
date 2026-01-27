@@ -1,80 +1,44 @@
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SnapshotService {
-  final _client = Supabase.instance.client;
-  static const String _bucketName = 'snapshots';
+  // Uses Playback Server (8090) for Media storage
+  static const String _gatewayUrl = 'http://127.0.0.1:8090/snapshot';
 
-  // 1. Capture Snapshot from Go2RTC
-  Future<Uint8List?> captureFrame(
-    String streamUrl, {
-    String host = '127.0.0.1',
-  }) async {
+  Future<void> uploadSnapshot(
+    String cameraId,
+    String cameraName,
+    Uint8List imageBytes,
+  ) async {
     try {
-      // Generate the same streamId used by WebRTCService
-      final streamId = 'cam_${streamUrl.hashCode.abs()}';
+      final encodedName = Uri.encodeQueryComponent(cameraName);
+      final uri = Uri.parse(
+        '$_gatewayUrl?camera_id=$cameraId&camera_name=$encodedName',
+      );
+      debugPrint('📸 Uploading snapshot to Gateway: $uri');
 
-      // Go2RTC API: http://localhost:1984/api/frame.jpeg?src=streamId
-      final url = 'http://$host:1984/api/frame.jpeg?src=$streamId';
+      final response = await http.post(
+        uri,
+        body: imageBytes,
+        headers: {'Content-Type': 'image/jpeg'},
+      );
 
-      debugPrint('📸 Capturing snapshot from: $url');
-
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        debugPrint('✅ Snapshot captured successfully');
-        return response.bodyBytes;
-      } else {
-        debugPrint('❌ Snapshot failed: ${response.statusCode}');
-        throw Exception('Failed to capture frame: HTTP ${response.statusCode}');
+      if (response.statusCode != 200) {
+        throw Exception(
+          'Gateway upload failed: ${response.statusCode} ${response.body}',
+        );
       }
+
+      debugPrint('✅ Snapshot upload success');
     } catch (e) {
       debugPrint('❌ Snapshot Error: $e');
-      throw Exception('Failed to capture frame');
+      rethrow;
     }
   }
 
-  // 2. Upload to Supabase Storage and Return Public URL
-  Future<String?> uploadSnapshot(String cameraId, Uint8List imageBytes) async {
-    try {
-      debugPrint('📤 Encoding ${imageBytes.length} bytes to JPEG...');
-
-      // Use timestamp for unique filename
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final path = '$cameraId/$timestamp.jpg';
-
-      debugPrint('📤 Uploading to Supabase: $path');
-
-      // Upload raw bytes (already in frame format from VideoTrack)
-      await _client.storage
-          .from(_bucketName)
-          .uploadBinary(
-            path,
-            imageBytes,
-            fileOptions: const FileOptions(
-              upsert: false, // Don't overwrite, create new
-              contentType: 'image/jpeg',
-            ),
-          );
-
-      final publicUrl = _client.storage.from(_bucketName).getPublicUrl(path);
-
-      debugPrint('✅ Upload complete: $publicUrl');
-
-      // Update Camera Record with latest snapshot URL
-      await _client
-          .from('cameras')
-          .update({'snapshot_url': publicUrl})
-          .eq('id', cameraId);
-
-      return publicUrl;
-    } catch (e) {
-      debugPrint('❌ Upload Error: $e');
-      return null;
-    }
+  // Helper to get URL for UI (e.g. Image.network)
+  String getSnapshotUrl(String cameraId) {
+    return '$_gatewayUrl?camera_id=$cameraId&t=${DateTime.now().millisecondsSinceEpoch}'; // Cache buster
   }
-
-  // Helper: Create bucket if not exists (Usually done via Supabase Dashboard, but useful helper)
-  // Note: Only works if RLS policies allow bucket creation (Unlikely for Anon).
 }

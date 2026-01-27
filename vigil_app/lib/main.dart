@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:media_kit/media_kit.dart'; // M6-3: MediaKit
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:vigil_app/features/dashboard/presentation/screens/grid_view_screen.dart';
 import 'package:vigil_app/features/auth/presentation/screens/login_screen.dart';
@@ -7,6 +8,7 @@ import 'package:vigil_app/core/config/constants.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized(); // M6-3: Initialize Video Player
 
   // Initialize Supabase (with placeholders for now)
   // We wrap this in a try-catch to avoid crashing if credentials are missing during dev

@@ -1,0 +1,25 @@
+log:
+  level: info
+  format: text
+
+streams:
+  bunny:
+    - exec:./ffmpeg.exe -re -f lavfi -i testsrc=size=320x240:rate=15 \
+      -c:v libx264 -g 15 -preset ultrafast -tune zerolatency \
+      -f rtsp {output}
+  cam_221540953:
+    - rtsp://192.168.1.233:554/stander/livestream/0/0
+  cam_541166789:
+    - rtsp://192.168.1.221:554/stander/livestream/0/0
+
+  cam_231556246:
+    - rtsp://admin:Vigil@123@192.168.1.13:554/stander/livestream/0/0
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
